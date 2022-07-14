@@ -5,6 +5,9 @@ from transformers import *
 from tqdm import tqdm
 import gc
 import argparse
+from tensorflow.keras.utils import pad_sequences
+from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset, DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_gpu = torch.cuda.device_count()
@@ -49,10 +52,11 @@ def get_mode_labels(df, mode="e_s_c_i"):
     if mode == "e_s_c_i":
         return df['class'].apply(
             lambda x: 'e' if x == "exact" else 's' if x == "substitute" else 'c' if x == "complement" else "i")
+
     if mode == "e_s_ci":
         return df['class'].apply(lambda x: 'e' if x == "exact" else 's' if x == "substitute" else 'ci')
     if mode == "e_sci":
-        return df['class'].apply(lambda x: 'e' if x == "e" else 'sci')
+        return df['class'].apply(lambda x: 'e' if x == "exact" else 'sci')
     if mode == "es_ci":
         return df['class'].apply(lambda x: 'es' if (x == "exact" or x == "substitute") else 'ci')
 
@@ -98,10 +102,12 @@ def tokenize_inputs(text_kw_list, text_ti_list, tokenizer, num_embeddings=128):
         input_ids.append(input_id)
         attention_masks.append(attention_mask)
     input_ids = pad_sequences(input_ids, maxlen=num_embeddings, dtype="long", truncating="post", padding="post")
-    return list(input_ids), attention_masks
+    attention_masks = pad_sequences(attention_masks, maxlen=num_embeddings, dtype="long", truncating="post",
+                                    padding="post", value=0)
+    return list(input_ids), list(attention_masks)
 
 
-def save_dataloader(path="new_dataset/trainer.tsv", mode="e_s_ci", df_frac=1,
+def save_dataloader(path="new_dataset/trainer.tsv", mode="e_s_c_i", df_frac=1,
                     language_model="xlm", max_length=128, split_mark="train",
                     create_validation=0.05, batch_size=8):
     """
@@ -118,7 +124,9 @@ def save_dataloader(path="new_dataset/trainer.tsv", mode="e_s_ci", df_frac=1,
     batch_size: int - number of samples/batch in the dataloader
     """
     #
-    df = pd.read_csv(path, sep="\t")
+    df = pd.read_pickle(path)
+    df = df.fillna("")
+    df = df.rename(columns={"query": "keyword", "product_title": "title", "esci_label": "class"})
     df = df.sample(frac=df_frac, random_state=42)
     print_data_statistics(df)
     df = df[["keyword", "title", "class"]]
@@ -190,7 +198,7 @@ def get_graph_inputs(keywords):
     return node1_list
 
 
-def save_graph_dataloader(path="new_dataset/trainer.tsv", mode="e_s_ci", df_frac=1,
+def save_graph_dataloader(path="new_dataset/trainer.tsv", mode="e_s_c_i", df_frac=1,
                           split_mark="train",
                           create_validation=0.05, batch_size=8):
     """
@@ -204,7 +212,10 @@ def save_graph_dataloader(path="new_dataset/trainer.tsv", mode="e_s_ci", df_frac
     create_validation:float - use part of the dataset as validation dataset
     batch_size: int - number of samples/batch in the dataloader
     """
-    df = pd.read_csv(path, sep="\t")
+    # df = pd.read_csv(path, sep="\t")
+    df = pd.read_pickle(path)
+    df = df.fillna("")
+    df = df.rename(columns={"query": "keyword", "product_title": "title", "esci_label": "class"})
     df = df.sample(frac=df_frac, random_state=42)
     print_data_statistics(df)
     df = df[["keyword", "title"]]
@@ -216,13 +227,28 @@ def save_graph_dataloader(path="new_dataset/trainer.tsv", mode="e_s_ci", df_frac
         keywords_train, keywords_validation, titles_train, titles_validation = train_test_split(keywords, titles,
                                                                                                 test_size=create_validation,
                                                                                                 shuffle=False)
-        node1_train = get_graph_inputs(keywords_train)
-        node2_train = get_graph_inputs(titles_train)
-        node1_validation = get_graph_inputs(keywords)
-        node2_validation = get_graph_inputs(titles)
+        len_keywords_train = len(keywords_train)
+        len_keywords_validation = len(keywords_validation)
+        len_titles_train = len(titles_train)
+        len_titles_validation = len(titles_validation)
+        print(len_keywords_train, len_keywords_validation, len_titles_train, len_titles_validation)
+        all_qt = keywords_train + keywords_validation + titles_train + titles_validation
+        all_nodes = get_graph_inputs(all_qt)
+        print("all_nodes ready graph_inputs")
+        node1_train = all_nodes[:len_keywords_train]
+        node1_validation = all_nodes[len_keywords_train:len_keywords_train+len_keywords_validation]
+        node2_train = all_nodes[len_keywords_train+len_keywords_validation:len_keywords_train+len_keywords_validation+len_titles_train]
+        node2_validation = all_nodes[len_keywords_train+len_keywords_validation+len_titles_train:]
+        # node1_train = get_graph_inputs(keywords_train)
+        # node2_train = get_graph_inputs(titles_train)
+        # node1_validation = get_graph_inputs(keywords)
+        # node2_validation = get_graph_inputs(titles)
     else:
         node1_train = get_graph_inputs(keywords)
         node2_train = get_graph_inputs(titles)
+    with open(f'./dataloader/keywords_train-keywords_validation-titles_train-titles_validation.pkl',
+              "wb") as file_handler:
+        pickle.dump([keywords_train, keywords_validation, titles_train, titles_validation], file_handler)
     gc.collect()
     with open(f'./dataloader/{split_mark}_data_loader_node1_{mode}', "wb") as file_handler:
         pickle.dump(list(node1_train), file_handler)
@@ -252,7 +278,8 @@ if __name__ == "__main__":
     ./dataloader/: Contains the graph and text dataloaders for the dataset.
     """
     parser = argparse.ArgumentParser(description='Construct dataloader from query-asin dataset')
-    parser.add_argument('--path', metavar='P', type=str, help='path to the query-asin dataset')
+    parser.add_argument('--path', metavar='P', type=str, help='path to the query-asin dataset',
+                        default="node_embeds/t12_graph_esc.pkl")
     parser.add_argument('--frac', metavar='F', type=float, default=1,
                         help='incase you need to only process a fraction of the dataset')
     parser.add_argument('--mode', metavar='M', type=str, default="e_s_ci",
@@ -269,11 +296,11 @@ if __name__ == "__main__":
     parser.add_argument('--month', metavar='mnth', type=str, default="01", help='batch size of the dataloaders')
 
     args = parser.parse_args()
-    print(args)
-    save_dataloader(path=args.path, mode=args.mode, df_frac=args.frac,
-                    language_model=args.lm, max_length=args.maxlen, split_mark=args.split_mark,
-                    create_validation=args.create_validation, batch_size=args.batch_size, mkt=args.mkt,
-                    month=args.month)
+    # print(args)
+    # save_dataloader(path=args.path, mode=args.mode, df_frac=args.frac,
+    #                 language_model=args.lm, max_length=args.maxlen, split_mark=args.split_mark,
+    #                 create_validation=args.create_validation, batch_size=args.batch_size)
+    print("save_dataloader DONE")
     save_graph_dataloader(path=args.path, mode=args.mode, df_frac=args.frac,
                           split_mark=args.split_mark,
-                          create_validation=args.create_validation, batch_size=args.batch_size, mkt=args.mkt)
+                          create_validation=args.create_validation, batch_size=args.batch_size)

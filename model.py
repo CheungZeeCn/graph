@@ -5,11 +5,13 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
+
 class GCN(nn.Module):
     """
     2-layer Graph Convolution Network that encodes single graph neighborhood
     with node features of size num_features.
     """
+
     def __init__(self, num_labels, num_features=768):
         """
         Constructor function to initialize GCN module.
@@ -36,12 +38,14 @@ class GCN(nn.Module):
         x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1)
 
+
 class Classifier(nn.Module):
     """
     Main Classifier module of the SMLM model.
     The classifier language model to encode text, GCN to encode keyword and title graph
     and finally utilizes attention to aggregate results for the final prediction.
     """
+
     def __init__(self, lm="xlm", mode="e_s_c_i", graph=None):
         """
         Constructor function to initialize Classifier module.
@@ -52,11 +56,16 @@ class Classifier(nn.Module):
         """
         super(Classifier, self).__init__()
         self.num_labels = len(mode.strip().split("_"))
-        self.lm_model = XLMRobertaForSequenceClassification.from_pretrained("xlm-roberta-base", num_labels=self.num_labels)
-        if not(graph is None):
+        self.lm_model = XLMRobertaForSequenceClassification.from_pretrained("xlm-roberta-base",
+                                                                            num_labels=self.num_labels)
+        if not (graph is None):
             self.gcn = GCN(self.num_labels)
         self.multihead_attn = nn.MultiheadAttention(self.num_labels, 1)
         self.output = nn.LazyLinear(self.num_labels)
+
+        # headcode !!! 768
+        self.deafult_embs = nn.Embedding(2, 768, max_norm=1)
+        torch.nn.init.kaiming_uniform_(self.deafult_embs.weight)
 
     def forward(self, text_input, attention_mask,
                 data1=[None], data2=[None]):
@@ -71,11 +80,22 @@ class Classifier(nn.Module):
         logits:tensor - the final class probabilities for loss computation.
         """
         logits = self.lm_model(text_input, attention_mask=attention_mask)
-        if (None in data1) or (None in data2): #Run in LM mode.
+        if (None in data1) or (None in data2):  # Run in LM mode.
             return logits[0]
-        node1_logits = torch.stack([torch.mean(self.gcn(n1),dim=0) for n1 in data1],dim=0)
-        node2_logits = torch.stack([torch.mean(self.gcn(n2),dim=0) for n2 in data2],dim=0)
-        logits = torch.stack((logits[0],node1_logits,node2_logits),dim=1)
-        mh,_ = self.multihead_attn(logits,logits,logits)
+        node1_logits = torch.stack([torch.mean(self.gcn(n1), dim=0) for n1 in data1], dim=0)
+        node2_logits = torch.stack([torch.mean(self.gcn(n2), dim=0) for n2 in data2], dim=0)
+
+        #print(f"node1_logits.shape: {node1_logits.shape}")
+        #print(f"node2_logits.shape: {node2_logits.shape}")
+
+        logits = torch.stack((logits[0], node1_logits, node2_logits), dim=1)
+
+        # 8,3,3
+        #print(f"logits_concat.shape: {logits.shape}")
+
+        mh, _ = self.multihead_attn(logits, logits, logits)
+        # 8,3,3
+        # print(f"mh.shape: {mh.shape}")
+
         output_logits = mh.flatten(1)
         return self.output(output_logits)

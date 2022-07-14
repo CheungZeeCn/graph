@@ -5,6 +5,8 @@ import pickle
 from transformers import *
 from tqdm import tqdm
 from model import Classifier
+import kp_setup
+import logging
 
 """
 Sample program to train the SMLM model on marketplace agnostic dataset for the 
@@ -12,6 +14,10 @@ task of "e vs s vs ci" classification on cuda device
 
 Run as: python train.py
 Marketplace-specific finetuning of the model recommended prior to use on test datasets.
+
+改成利用emb来分类?
+哪一部分出emb?
+
 """
 import itertools
 
@@ -74,6 +80,7 @@ num_labels = len(mode.split("_"))
 # Set the class weights (calculated offline using sklearn)
 weights = {"e_s_c_i": [0.4115, 1.3260, 1.6203, 5.0389], "e_s_ci": [0.4115, 1.3260, 3.3296], "e_sci": [0.4115, 2.6617]}
 for _ in range(epochs):
+    logging.info(f"epoch {_}")
     # Training
 
     # Set our model to training mode
@@ -85,6 +92,7 @@ for _ in range(epochs):
 
     train1_loader = chunked(train1_graph, batch_size)
     train2_loader = chunked(train2_graph, batch_size)
+    logging.info(f"len: {len(train_dataloader)}  {len(train1_graph)} {len(train2_graph)}")
     # Train the data for one epoch
     for step, batch in enumerate(tqdm(train_dataloader)):
         # Apd batch to GPU
@@ -96,11 +104,13 @@ for _ in range(epochs):
         graph1 = next(train1_loader)
         graph2 = next(train2_loader)
         for g_i in range(len(graph1)):
-            if graph1[g_i] == None: continue
+            if graph1[g_i] == None:
+                continue
             graph1[g_i].x = graph1[g_i].x.float()
             graph1[g_i] = graph1[g_i].cuda()
         for g_i in range(len(graph2)):
-            if graph2[g_i] == None: continue
+            if graph2[g_i] == None:
+                continue
             graph2[g_i].x = graph2[g_i].x.float()
             graph2[g_i] = graph2[g_i].cuda()
         # Forward pass for multilabel classification
@@ -123,6 +133,9 @@ for _ in range(epochs):
         nb_tr_steps += 1
 
     print("Train loss: {}".format(tr_loss / nb_tr_steps))
+    logging.info("Train loss: {}".format(tr_loss / nb_tr_steps))
+
+    torch.save(model.state_dict(), f'{mode}_epoch{_}_mlm_structurelm_new_model_amazon_ckpt')
 
     ###############################################################################
 
@@ -152,7 +165,8 @@ for _ in range(epochs):
                 if graph2[g_i] == None: continue
                 graph2[g_i].x = graph2[g_i].x.float()
                 graph2[g_i] = graph2[g_i].cuda()
-            outs = model(b_input_ids, attention_mask=b_input_mask, data1=graph1, data2=graph2)
+            with torch.no_grad:
+                outs = model(b_input_ids, attention_mask=b_input_mask, data1=graph1, data2=graph2)
             b_logit_pred = outs
             pred_label = torch.sigmoid(b_logit_pred)
             b_logit_pred = b_logit_pred.detach().cpu().numpy()
@@ -177,6 +191,8 @@ for _ in range(epochs):
 
     print('F1 Validation Accuracy: ', val_f1_accuracy)
     print('Flat Validation Accuracy: ', val_flat_accuracy)
+    logging.info(f'F1 Validation Accuracy: {val_f1_accuracy}')
+    logging.info(f'Flat Validation Accuracy: {val_flat_accuracy}')
 
 # Save the trained marketplace-agnostic model for marketplace {mkt} and model {mode}
 torch.save(model.state_dict(), f'{mode}_mlm_structurelm_new_model_amazon_ckpt')
